@@ -15,16 +15,18 @@ End-to-end analytics pipeline to predict 30-day readmission risk from CMS claims
 - **Versioning/CI**: GitHub + optional CI (lint/test/dbt).
 
 ## Architecture diagram
+## Architecture diagram
+
 ```mermaid
 flowchart LR
-  A[Raw CMS Claims\nCSV/Parquet] --> B[Bronze\nDelta tables]
-  B --> C[Silver\nCleaned & conformed]
-  C --> D[Gold\nAnalytics marts]
-  D --> E[Feature Store /\nTraining dataset]
-  E --> F[Model Training\n(MLflow)]
-  F --> G[Batch Scoring]
-  G --> H[Risk Stratification\n& Cohorts]
-  H --> I[Dashboards /\nExports]
+  A["Raw CMS Claims<br/>(CSV, Parquet)"] --> B["Bronze Delta tables"]
+  B --> C["Silver: cleaned & conformed"]
+  C --> D["Gold analytics marts"]
+  D --> E["Feature store / training dataset"]
+  E --> F["Model training (MLflow)"]
+  F --> G["Batch scoring"]
+  G --> H["Risk stratification & cohorts"]
+  H --> I["Dashboards / exports"]
 ```
 
 ## Key outputs
