@@ -15,40 +15,16 @@ End-to-end analytics pipeline to predict 30-day readmission risk from CMS claims
 - **Versioning/CI**: GitHub + optional CI (lint/test/dbt).
 
 ## Architecture diagram
-> Replace placeholders with exported images from Canva and commit them to the repo (e.g., `docs/diagrams/`).
-
-### Medallion + ML flow
 ```mermaid
 flowchart LR
-  A[Raw CMS Claims
-CSV/Parquet] --> B[Bronze
-Delta tables]
-  B --> C[Silver
-Cleaned & conformed]
-  C --> D[Gold
-Analytics marts]
-  D --> E[Feature Store /
-Training dataset]
-  E --> F[Model Training
-(MLflow)]
+  A[Raw CMS Claims\nCSV/Parquet] --> B[Bronze\nDelta tables]
+  B --> C[Silver\nCleaned & conformed]
+  C --> D[Gold\nAnalytics marts]
+  D --> E[Feature Store /\nTraining dataset]
+  E --> F[Model Training\n(MLflow)]
   F --> G[Batch Scoring]
-  G --> H[Risk Stratification
-& Cohorts]
-  H --> I[Dashboards /
-Exports]
-```
-
-### Canva diagram placeholders
-- **Architecture (Canva)**: _TBD_ (paste link) — `[[CANVA_LINK_ARCHITECTURE]]`
-- **Data model (Canva)**: _TBD_ (paste link) — `[[CANVA_LINK_DATA_MODEL]]`
-
-Image placeholders (recommended paths):
-- `docs/diagrams/architecture.png`
-- `docs/diagrams/data_model.png`
-
-```text
-![Architecture](docs/diagrams/architecture.png)
-![Data Model](docs/diagrams/data_model.png)
+  G --> H[Risk Stratification\n& Cohorts]
+  H --> I[Dashboards /\nExports]
 ```
 
 ## Key outputs
