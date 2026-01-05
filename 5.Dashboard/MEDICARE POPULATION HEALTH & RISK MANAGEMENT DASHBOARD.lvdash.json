@@ -1,0 +1,3432 @@
+{
+  "datasets": [
+    {
+      "name": "1f02dc4e",
+      "displayName": "Question 1",
+      "queryLines": [
+        "-- Which patients are in the top 10% risk tier for 30-day readmission based on claims history, comorbidities, and utilization patterns?\n",
+        "WITH Patient_Scoring AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        -- 1. Calculate Comorbidity Score (Using MAX to avoid double counting chronic conditions)\n",
+        "        (\n",
+        "            MAX(CASE WHEN SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_CHF = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_COPD = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_DEPRESSN = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_DIABETES = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_RA_OA = '1' THEN 1 ELSE 0 END) +\n",
+        "            MAX(CASE WHEN SP_STRKETIA = '1' THEN 1 ELSE 0 END)\n",
+        "        ) AS comorbidity_score,\n",
+        "\n",
+        "        -- 2. Calculate Utilization Score (Prior ER and Inpatient history)\n",
+        "        -- We can weight these higher (e.g., * 2) if they are stronger predictors, \n",
+        "        -- but here we simply add the raw counts.\n",
+        "        (\n",
+        "            MAX(prior_admissions_6mo) + \n",
+        "            MAX(er_visits_7days_prior)\n",
+        "        ) AS utilization_score\n",
+        "\n",
+        "    FROM phr.`03_gold`.readmission_events\n",
+        "    WHERE is_index_admission = 1\n",
+        "    -- Note: We removed 'AND is_readmission_30day = 1' because you want to \n",
+        "    -- predict risk for the WHOLE population, not just those who already failed.\n",
+        "    GROUP BY DESYNPUF_ID\n",
+        "),\n",
+        "\n",
+        "Ranked_Patients AS (\n",
+        "    SELECT \n",
+        "        DESYNPUF_ID,\n",
+        "        comorbidity_score,\n",
+        "        utilization_score,\n",
+        "        (comorbidity_score + utilization_score) AS total_risk_score,\n",
+        "        -- 3. Rank over the ENTIRE population (No Partition by ID)\n",
+        "        PERCENT_RANK() OVER (ORDER BY (comorbidity_score + utilization_score) DESC) as risk_percentile\n",
+        "    FROM Patient_Scoring\n",
+        ")\n",
+        "\n",
+        "-- -- 4. Filter for Top 10%\n",
+        "-- SELECT *\n",
+        "-- FROM Ranked_Patients\n",
+        "-- WHERE risk_percentile <= 0.10\n",
+        "-- ORDER BY risk_percentile ASC\n",
+        "\n",
+        "SELECT \n",
+        "    COUNT(DISTINCT DESYNPUF_ID) AS high_risk_volume,\n",
+        "    AVG(total_risk_score) AS high_risk_avg_score,\n",
+        "    (SELECT AVG(total_risk_score) FROM Ranked_Patients) AS population_avg_score,\n",
+        "    (SELECT COUNT(DISTINCT DESYNPUF_ID) FROM Patient_Scoring) AS tot_population\n",
+        "FROM Ranked_Patients\n",
+        "WHERE risk_percentile <= 0.10;"
+      ],
+      "columns": [
+        {
+          "displayName": "pct_hr_popn",
+          "description": "",
+          "expression": "SUM(high_risk_avg_score) * 100 / SUM(population_avg_score)"
+        }
+      ],
+      "catalog": "phr",
+      "schema": "03_gold"
+    },
+    {
+      "name": "27d2ead4",
+      "displayName": "Question 2",
+      "queryLines": [
+        "-- 2. What are the top 5 primary diagnosis categories (DRGs) with the highest readmission rates, and which specific patient characteristics drive these readmissions?\n",
+        "SELECT\n",
+        "    drg.SHORT_TITLE AS diagnosis,\n",
+        "    -- 1. The Rate\n",
+        "    COUNT(*) AS total_cases,\n",
+        "    ROUND(AVG(is_readmission_30day) * 1.0, 4) AS readmission_rate,\n",
+        "    \n",
+        "    -- 2. The Drivers (Profile of Readmitted Patients Only)\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 THEN AGE END), 1) AS avg_age_readmitted,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 THEN length_of_stay END), 1) AS avg_los_readmitted,\n",
+        "    ROUND(1.00 * SUM(CASE WHEN is_readmission_30day = 1 AND BENE_SEX_IDENT_CD = '1' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN is_readmission_30day = 1 THEN 1 ELSE 0 END), 0), 1) AS pct_male,\n",
+        "    ROUND(1.00 * SUM(CASE WHEN is_readmission_30day = 1 AND BENE_SEX_IDENT_CD = '2' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN is_readmission_30day = 1 THEN 1 ELSE 0 END), 0), 1) AS pct_female,\n",
+        "\n",
+        "    -- Example of checking a specific top comorbidity driver (e.g., Heart Failure)\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_CHF = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_chf,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_alzh,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_ckd,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_CNCR = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_cancer,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_COPD = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_copd,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_DEPRESSN = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_depression,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_DIABETES = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_diabetes,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_ischemic,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_osteoporosis,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_RA_OA = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_rheumatoid_arth,\n",
+        "    ROUND(AVG(CASE WHEN is_readmission_30day = 1 AND SP_STRKETIA = '1' THEN 1 ELSE 0 END) * 1.0, 4) AS pct_readmitted_with_stroke\n",
+        "FROM phr.`03_gold`.readmission_events re\n",
+        "INNER JOIN phr.`03_gold`.drg_cd drg \n",
+        "    ON drg.DRG_CD = re.CLM_DRG_CD\n",
+        "WHERE re.is_index_admission = 1 -- Ensure we are looking at the base population\n",
+        "GROUP BY drg.SHORT_TITLE\n",
+        "HAVING COUNT(*) > 20 -- Filter out noise (adjust threshold as needed)\n",
+        "ORDER BY readmission_rate DESC, total_cases DESC\n",
+        "LIMIT 5;"
+      ],
+      "columns": [
+        {
+          "displayName": "avg_comorbid",
+          "description": "",
+          "expression": "(AVG(pct_readmitted_with_chf) + AVG(pct_readmitted_with_alzh)+ AVG(pct_readmitted_with_ckd)+ AVG(pct_readmitted_with_cancer)+ AVG(pct_readmitted_with_copd)+ AVG(pct_readmitted_with_depression) + AVG(pct_readmitted_with_diabetes) + AVG(pct_readmitted_with_ischemic) + AVG(pct_readmitted_with_osteoporosis) + AVG(pct_readmitted_with_rheumatoid_arth) + AVG(pct_readmitted_with_stroke)) / 11"
+        }
+      ],
+      "catalog": "phr",
+      "schema": "03_gold"
+    },
+    {
+      "name": "9fb6941e",
+      "displayName": "Question 3",
+      "queryLines": [
+        "-- [ ] What is the total cost of care (TCOC) for patients with 3+ chronic conditions vs. 1-2 conditions, and how does this vary by age group and geographic region?\n",
+        "WITH chronic_conditions AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        CASE\n",
+        "            WHEN chronic_count = 0 THEN '0'\n",
+        "            WHEN chronic_count BETWEEN 1 AND 2 THEN '1-2'\n",
+        "            ELSE '3+'\n",
+        "        END AS chronic_condition\n",
+        "    FROM (\n",
+        "        SELECT\n",
+        "            DESYNPUF_ID,\n",
+        "            -- Calculating the count of conditions\n",
+        "            (\n",
+        "              MAX(CASE WHEN SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CHF = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CNCR = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_COPD = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_DEPRESSN = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_DIABETES = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_RA_OA = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_STRKETIA = '1' THEN 1 ELSE 0 END)\n",
+        "            ) AS chronic_count\n",
+        "        FROM phr.`03_gold`.patient_summary_360\n",
+        "        GROUP BY DESYNPUF_ID\n",
+        "    )\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    -- 1. The Comparison Variable (Crucial for \"Vs\")\n",
+        "    cc.chronic_condition,\n",
+        "\n",
+        "    -- 2. Geographic Region (State)\n",
+        "    CASE ps.SP_STATE_CODE\n",
+        "        WHEN '01' THEN 'Alabama'\n",
+        "        WHEN '02' THEN 'Alaska'\n",
+        "        WHEN '03' THEN 'Arizona'\n",
+        "        WHEN '04' THEN 'Arkansas'\n",
+        "        WHEN '05' THEN 'California'\n",
+        "        WHEN '06' THEN 'Colorado'\n",
+        "        WHEN '07' THEN 'Connecticut'\n",
+        "        WHEN '08' THEN 'Delaware'\n",
+        "        WHEN '09' THEN 'District of Columbia'\n",
+        "        WHEN '10' THEN 'Florida'\n",
+        "        WHEN '11' THEN 'Georgia'\n",
+        "        WHEN '12' THEN 'Hawaii'\n",
+        "        WHEN '13' THEN 'Idaho'\n",
+        "        WHEN '14' THEN 'Illinois'\n",
+        "        WHEN '15' THEN 'Indiana'\n",
+        "        WHEN '16' THEN 'Iowa'\n",
+        "        WHEN '17' THEN 'Kansas'\n",
+        "        WHEN '18' THEN 'Kentucky'\n",
+        "        WHEN '19' THEN 'Louisiana'\n",
+        "        WHEN '20' THEN 'Maine'\n",
+        "        WHEN '21' THEN 'Maryland'\n",
+        "        WHEN '22' THEN 'Massachusetts'\n",
+        "        WHEN '23' THEN 'Michigan'\n",
+        "        WHEN '24' THEN 'Minnesota'\n",
+        "        WHEN '25' THEN 'Mississippi'\n",
+        "        WHEN '26' THEN 'Missouri'\n",
+        "        WHEN '27' THEN 'Montana'\n",
+        "        WHEN '28' THEN 'Nebraska'\n",
+        "        WHEN '29' THEN 'Nevada'\n",
+        "        WHEN '30' THEN 'New Hampshire'\n",
+        "        WHEN '31' THEN 'New Jersey'\n",
+        "        WHEN '32' THEN 'New Mexico'\n",
+        "        WHEN '33' THEN 'New York'\n",
+        "        WHEN '34' THEN 'North Carolina'\n",
+        "        WHEN '35' THEN 'North Dakota'\n",
+        "        WHEN '36' THEN 'Ohio'\n",
+        "        WHEN '37' THEN 'Oklahoma'\n",
+        "        WHEN '38' THEN 'Oregon'\n",
+        "        WHEN '39' THEN 'Pennsylvania'\n",
+        "        WHEN '41' THEN 'Rhode Island'\n",
+        "        WHEN '42' THEN 'South Carolina'\n",
+        "        WHEN '43' THEN 'South Dakota'\n",
+        "        WHEN '44' THEN 'Tennessee'\n",
+        "        WHEN '45' THEN 'Texas'\n",
+        "        WHEN '46' THEN 'Utah'\n",
+        "        WHEN '47' THEN 'Vermont'\n",
+        "        WHEN '49' THEN 'Virginia'\n",
+        "        WHEN '50' THEN 'Washington'\n",
+        "        WHEN '51' THEN 'West Virginia'\n",
+        "        WHEN '52' THEN 'Wisconsin'\n",
+        "        WHEN '53' THEN 'Wyoming'\n",
+        "        WHEN '54' THEN 'Others'\n",
+        "        ELSE 'Unknown'\n",
+        "    END AS state_name,\n",
+        "\n",
+        "    -- 3. Age Groups\n",
+        "    CASE\n",
+        "        WHEN ps.AGE < 65 THEN '<65'\n",
+        "        WHEN ps.AGE BETWEEN 65 AND 74 THEN '65-74'\n",
+        "        WHEN ps.AGE BETWEEN 75 AND 84 THEN '75-84'\n",
+        "        WHEN ps.AGE >= 85 THEN '85+'\n",
+        "        ELSE 'Unknown'\n",
+        "    END AS age_group,\n",
+        "\n",
+        "    -- 4. Cost Metrics\n",
+        "    COUNT(DISTINCT ps.DESYNPUF_ID) as patient_volume,\n",
+        "    SUM(ps.total_cost) AS total_cost_of_care,\n",
+        "    ROUND(AVG(ps.total_cost), 0) AS avg_cost_per_patient\n",
+        "\n",
+        "FROM phr.`03_gold`.patient_summary_360 ps\n",
+        "JOIN chronic_conditions cc\n",
+        "  ON cc.DESYNPUF_ID = ps.DESYNPUF_ID\n",
+        "-- Filter only for the groups we want to compare\n",
+        "WHERE cc.chronic_condition IN ( '1-2' , '3+')\n",
+        "GROUP BY 1, 2, 3\n",
+        "ORDER BY 1, 2, 3;"
+      ],
+      "columns": [
+        {
+          "displayName": "chronic_3",
+          "description": "",
+          "expression": "CASE WHEN chronic_condition = '3+' THEN avg_cost_per_patient END"
+        },
+        {
+          "displayName": "TOC_1_2",
+          "description": "",
+          "expression": "CASE WHEN chronic_condition = '1-2' THEN avg_cost_per_patient END "
+        }
+      ]
+    },
+    {
+      "name": "4bd3515c",
+      "displayName": "Question 4",
+      "queryLines": [
+        "--  [ ] Which chronic condition combinations (comorbidity clusters) drive the highest annual healthcare costs, and what percentage of total Medicare spending do they represent?\n",
+        "WITH patient_comorbidities AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        total_cost,\n",
+        "        -- Concatenate active conditions into a single string to create a \"cluster\" ID\n",
+        "        concat_ws(', ',\n",
+        "            CASE WHEN SP_ALZHDMTA = '1' THEN 'Alzheimer/Dementia' END,\n",
+        "            CASE WHEN SP_CHF = '1' THEN 'Heart Failure' END,\n",
+        "            CASE WHEN SP_CHRNKIDN = '1' THEN 'Kidney Disease' END,\n",
+        "            CASE WHEN SP_CNCR = '1' THEN 'Cancer' END,\n",
+        "            CASE WHEN SP_COPD = '1' THEN 'COPD' END,\n",
+        "            CASE WHEN SP_DEPRESSN = '1' THEN 'Depression' END,\n",
+        "            CASE WHEN SP_DIABETES = '1' THEN 'Diabetes' END,\n",
+        "            CASE WHEN SP_ISCHMCHT = '1' THEN 'Ischemic Heart Disease' END,\n",
+        "            CASE WHEN SP_OSTEOPRS = '1' THEN 'Osteoporosis' END,\n",
+        "            CASE WHEN SP_RA_OA = '1' THEN 'Rheumatoid/Osteoarthritis' END,\n",
+        "            CASE WHEN SP_STRKETIA = '1' THEN 'Stroke' END\n",
+        "        ) AS condition_cluster\n",
+        "    FROM phr.`03_gold`.patient_summary_360\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    -- Handle patients with no chronic conditions labeled\n",
+        "    COALESCE(NULLIF(condition_cluster, ''), 'No Chronic Conditions') AS comorbidity_cluster,\n",
+        "    \n",
+        "    -- Volume and Cost Metrics\n",
+        "    COUNT(DISTINCT DESYNPUF_ID) AS patient_count,\n",
+        "    SUM(total_cost) AS total_cluster_cost,\n",
+        "    ROUND(AVG(total_cost), 2) AS avg_cost_per_patient,\n",
+        "    \n",
+        "    -- Percentage of Total Spending (Window Function)\n",
+        "    ROUND(SUM(total_cost) * 1.00 / SUM(SUM(total_cost)) OVER (), 4) AS pct_of_total_spending\n",
+        "\n",
+        "FROM patient_comorbidities\n",
+        "GROUP BY 1\n",
+        "ORDER BY total_cluster_cost DESC\n",
+        "LIMIT 20;"
+      ]
+    },
+    {
+      "name": "79fbea6d",
+      "displayName": "Question 5",
+      "queryLines": [
+        "-- [ ] What percentage of Medicare beneficiaries are high utilizers (top 5% of costs), and what are their demographic and clinical characteristics?\n",
+        "SELECT\n",
+        "    -- Demographics\n",
+        "    CASE\n",
+        "        WHEN AGE < 65 THEN '<65'\n",
+        "        WHEN AGE BETWEEN 65 AND 74 THEN '65-74'\n",
+        "        WHEN AGE BETWEEN 75 AND 84 THEN '75-84'\n",
+        "        ELSE '85+'\n",
+        "    END AS age_group,\n",
+        "    BENE_SEX_IDENT_CD AS sex,\n",
+        "    BENE_RACE_CD AS race,\n",
+        "\n",
+        "    -- Utilization Metrics\n",
+        "    COUNT(DISTINCT DESYNPUF_ID) AS patient_count,\n",
+        "    ROUND(AVG(total_cost), 2) AS avg_annual_cost,\n",
+        "    \n",
+        "    -- Clinical Characteristics: Prevalence of top conditions in this group\n",
+        "    ROUND(AVG(CAST(SP_CHF AS INT)) * 1.00, 1) AS pct_with_heart_failure,\n",
+        "    ROUND(AVG(CAST(SP_DIABETES AS INT)) * 1.00, 1) AS pct_with_diabetes,\n",
+        "    ROUND(AVG(CAST(SP_CHRNKIDN AS INT)) * 1.00, 1) AS pct_with_kidney_disease\n",
+        "\n",
+        "FROM phr.`03_gold`.patient_summary_360\n",
+        "WHERE is_high_utilizer_top5pct = 1\n",
+        "GROUP BY 1, 2, 3\n",
+        "ORDER BY 1, 2, 3;"
+      ],
+      "columns": [
+        {
+          "displayName": "total_patients",
+          "description": "",
+          "expression": "SUM(patient_count)"
+        }
+      ]
+    },
+    {
+      "name": "c9557e32",
+      "displayName": "Question 6",
+      "queryLines": [
+        "-- [ ] [NEW] What is the average prescription drug cost per patient by chronic condition, and what percentage of patients are on 5+ medications (polypharmacy)?\n",
+        "WITH conditions AS (\n",
+        "  SELECT\n",
+        "    DESYNPUF_ID,\n",
+        "    (\n",
+        "      (CASE WHEN SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CHF = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CNCR = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_COPD = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_DEPRESSN = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_DIABETES = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_RA_OA = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_STRKETIA = '1' THEN 1 ELSE 0 END)\n",
+        "    ) AS condition_count\n",
+        "  FROM phr.`03_gold`.patient_summary_360\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN condition_count = 0 THEN '0 Conditions'\n",
+        "    WHEN condition_count BETWEEN 1 AND 2 THEN '1-2 Conditions'\n",
+        "    ELSE '3+ Conditions'\n",
+        "  END AS chronic_group,\n",
+        "  \n",
+        "  COUNT(c.DESYNPUF_ID) AS patient_count,\n",
+        "  ROUND(AVG(m.total_drug_cost), 2) AS avg_annual_drug_cost,\n",
+        "  -- Polypharmacy defined as 5+ unique medications\n",
+        "  ROUND(SUM(CASE WHEN m.unique_medications >= 5 THEN 1 ELSE 0 END) * 1.00 / COUNT(*), 1) AS pct_polypharmacy_5plus_meds,\n",
+        "  pct_polypharmacy_5plus_meds * patient_count AS polypharmacy_5plus_meds_count\n",
+        "\n",
+        "FROM conditions c\n",
+        "JOIN phr.`03_gold`.medication_adherence_profile m \n",
+        "  ON c.DESYNPUF_ID = m.DESYNPUF_ID\n",
+        "GROUP BY 1\n",
+        "ORDER BY 1;"
+      ]
+    },
+    {
+      "name": "ec661058",
+      "displayName": "Question 7",
+      "queryLines": [
+        "-- - [x] How much could be saved annually if readmission rates were reduced by 10%, 20%, or 30% across different patient risk tiers?\n",
+        "WITH patient_risk_segments AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        -- Define Risk Tiers based on prior utilization\n",
+        "        CASE \n",
+        "            WHEN MAX(prior_admissions_6mo) >= 3 THEN 'Tier 1: High Risk (Top 20%)'\n",
+        "            WHEN MAX(prior_admissions_6mo) BETWEEN 1 AND 2 THEN 'Tier 2: Moderate Risk'\n",
+        "            ELSE 'Tier 3: Low Risk'\n",
+        "        END AS risk_tier,\n",
+        "        COUNT(*) as total_admissions,\n",
+        "        SUM(CASE WHEN is_readmission_30day = 1 THEN 1 ELSE 0 END) as readmission_count,\n",
+        "        SUM(CASE WHEN is_readmission_30day = 1 THEN CLM_PMT_AMT ELSE 0 END) as total_readmission_cost\n",
+        "    FROM phr.`03_gold`.readmission_events\n",
+        "    GROUP BY 1\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    risk_tier,\n",
+        "    COUNT(DISTINCT DESYNPUF_ID) AS patient_volume,\n",
+        "    SUM(readmission_count) AS total_readmissions,\n",
+        "    ROUND(SUM(total_readmission_cost), 0) AS total_annual_readmission_spend,\n",
+        "    \n",
+        "    -- Savings Scenarios\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.10, 0) AS potential_savings_10pct,\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.20, 0) AS potential_savings_20pct,\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.30, 0) AS potential_savings_30pct,\n",
+        "\n",
+        "    -- ROI Calculation (Targeting Tier 1 High Risk only)\n",
+        "    -- Assumption: TCM Program Cost = $500 per patient\n",
+        "    -- Assumption: TCM Effectiveness = 20% reduction in readmissions\n",
+        "    CASE \n",
+        "        WHEN risk_tier LIKE '%High Risk%' THEN \n",
+        "            ROUND(((SUM(total_readmission_cost) * 0.20) - (COUNT(DISTINCT DESYNPUF_ID) * 500)) / \n",
+        "            (COUNT(DISTINCT DESYNPUF_ID) * 500) * 100, 1) \n",
+        "        ELSE NULL \n",
+        "    END AS projected_roi_pct_at_20pct_reduction\n",
+        "\n",
+        "FROM patient_risk_segments\n",
+        "GROUP BY 1\n",
+        "ORDER BY 1;"
+      ],
+      "columns": [
+        {
+          "displayName": "tier_1_patient_vol",
+          "description": "",
+          "expression": "CASE WHEN risk_tier  = 'Tier 1: High Risk (Top 20%)' THEN patient_volume END"
+        },
+        {
+          "displayName": "sum_patient_vol",
+          "description": "",
+          "expression": "SUM(patient_volume)"
+        }
+      ]
+    },
+    {
+      "name": "55660b43",
+      "displayName": "Question 7.1",
+      "queryLines": [
+        "-- - [x] How much could be saved annually if readmission rates were reduced by 10%, 20%, or 30% across different patient risk tiers?\n",
+        "WITH patient_risk_segments AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        -- Define Risk Tiers based on prior utilization\n",
+        "        CASE \n",
+        "            WHEN MAX(prior_admissions_6mo) >= 3 THEN 'Tier 1: High Risk (Top 20%)'\n",
+        "            WHEN MAX(prior_admissions_6mo) BETWEEN 1 AND 2 THEN 'Tier 2: Moderate Risk'\n",
+        "            ELSE 'Tier 3: Low Risk'\n",
+        "        END AS risk_tier,\n",
+        "        COUNT(*) as total_admissions,\n",
+        "        SUM(CASE WHEN is_readmission_30day = 1 THEN 1 ELSE 0 END) as readmission_count,\n",
+        "        SUM(CASE WHEN is_readmission_30day = 1 THEN CLM_PMT_AMT ELSE 0 END) as total_readmission_cost\n",
+        "    FROM phr.`03_gold`.readmission_events\n",
+        "    GROUP BY 1\n",
+        "),\n",
+        "\n",
+        "psegments AS (\n",
+        "SELECT\n",
+        "    risk_tier,\n",
+        "    COUNT(DISTINCT DESYNPUF_ID) AS patient_volume,\n",
+        "    SUM(readmission_count) AS total_readmissions,\n",
+        "    ROUND(SUM(total_readmission_cost), 0) AS total_annual_readmission_spend,\n",
+        "    \n",
+        "    -- Savings Scenarios\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.10, 0) AS potential_savings_10pct,\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.20, 0) AS potential_savings_20pct,\n",
+        "    ROUND(SUM(total_readmission_cost) * 0.30, 0) AS potential_savings_30pct,\n",
+        "\n",
+        "    -- ROI Calculation (Targeting Tier 1 High Risk only)\n",
+        "    -- Assumption: TCM Program Cost = $500 per patient\n",
+        "    -- Assumption: TCM Effectiveness = 20% reduction in readmissions\n",
+        "    CASE \n",
+        "        WHEN risk_tier LIKE '%High Risk%' THEN \n",
+        "            ROUND(((SUM(total_readmission_cost) * 0.20) - (COUNT(DISTINCT DESYNPUF_ID) * 500)) / \n",
+        "            (COUNT(DISTINCT DESYNPUF_ID) * 500) * 100, 1) \n",
+        "        ELSE NULL \n",
+        "    END AS projected_roi_pct_at_20pct_reduction\n",
+        "\n",
+        "FROM patient_risk_segments\n",
+        "GROUP BY 1\n",
+        "ORDER BY 1\n",
+        ")\n",
+        "\n",
+        "SELECT '10%' AS savings_tier, potential_savings_10pct AS savings_amount\n",
+        "FROM psegments\n",
+        "UNION ALL\n",
+        "SELECT '20%' AS savings_tier, potential_savings_20pct AS savings_amount\n",
+        "FROM psegments\n",
+        "UNION ALL\n",
+        "SELECT '30%' AS savings_tier, potential_savings_30pct AS savings_amount\n",
+        "FROM psegments;"
+      ]
+    },
+    {
+      "name": "7a5d7da5",
+      "displayName": "Question 8",
+      "queryLines": [
+        "-- - [x] What would be the projected ROI of implementing a transitional care management (TCM) program for patients in the top 20% readmission risk tier?\n",
+        "WITH patient_risk_ranking AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        SUM(prior_admissions_6mo) as total_prior_admissions,\n",
+        "        SUM(CASE WHEN is_readmission_30day = 1 THEN CLM_PMT_AMT ELSE 0 END) as annual_readmission_spend,\n",
+        "        -- Rank patients by risk (utilization) to find the Top 20%\n",
+        "        PERCENT_RANK() OVER (ORDER BY SUM(prior_admissions_6mo) DESC) as risk_percentile\n",
+        "    FROM phr.`03_gold`.readmission_events\n",
+        "    GROUP BY 1\n",
+        "),\n",
+        "intervention_cohort AS (\n",
+        "    SELECT\n",
+        "        COUNT(*) as enrolled_patients,\n",
+        "        SUM(annual_readmission_spend) as total_cohort_spend\n",
+        "    FROM patient_risk_ranking\n",
+        "    WHERE risk_percentile <= 0.20 -- Top 20% Risk Tier\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    enrolled_patients,\n",
+        "    ROUND(total_cohort_spend, 0) as current_annual_readmission_spend,\n",
+        "    \n",
+        "    -- Investment Required\n",
+        "    ROUND(enrolled_patients * 500, 0) as total_program_cost_at_500_per_patient,\n",
+        "    \n",
+        "    -- Projected Savings (assuming 20% reduction)\n",
+        "    ROUND(total_cohort_spend * 0.20, 0) as projected_gross_savings,\n",
+        "    \n",
+        "    -- ROI Calculation\n",
+        "    ROUND(\n",
+        "        ((total_cohort_spend * 0.20) - (enrolled_patients * 500)) \n",
+        "        / (enrolled_patients * 500) * 1\n",
+        "    , 4) as projected_roi_percentage\n",
+        "\n",
+        "FROM intervention_cohort;"
+      ]
+    },
+    {
+      "name": "40ebca46",
+      "displayName": "Question 9",
+      "queryLines": [
+        "-- 1. What is the average length of stay (LOS) and admission frequency for patients by chronic condition burden (0, 1-2, 3+ conditions)?\n",
+        "WITH chronic_conditions AS (\n",
+        "    SELECT\n",
+        "        DESYNPUF_ID,\n",
+        "        CASE\n",
+        "            WHEN chronic_count = 0 THEN '0'\n",
+        "            WHEN chronic_count BETWEEN 1 AND 2 THEN '1-2'\n",
+        "            ELSE '3+'\n",
+        "        END AS chronic_condition\n",
+        "    FROM (\n",
+        "        SELECT\n",
+        "            DESYNPUF_ID,\n",
+        "            (\n",
+        "              MAX(CASE WHEN SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CHF = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_CNCR = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_COPD = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_DEPRESSN = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_DIABETES = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_RA_OA = '1' THEN 1 ELSE 0 END) +\n",
+        "              MAX(CASE WHEN SP_STRKETIA = '1' THEN 1 ELSE 0 END)\n",
+        "            ) AS chronic_count\n",
+        "        FROM phr.`03_gold`.readmission_events\n",
+        "        GROUP BY DESYNPUF_ID\n",
+        "    )\n",
+        ")\n",
+        "SELECT\n",
+        "    cc.chronic_condition,\n",
+        "    ROUND(AVG(re.length_of_stay), 2) AS avg_los,\n",
+        "    ROUND(COUNT(re.CLM_ID) / COUNT(DISTINCT re.DESYNPUF_ID), 2) avg_admissions_per_patient,\n",
+        "    COUNT(*) AS admission_frequency\n",
+        "FROM phr.`03_gold`.readmission_events re\n",
+        "JOIN chronic_conditions cc\n",
+        "  ON re.DESYNPUF_ID = cc.DESYNPUF_ID\n",
+        "WHERE re.is_index_admission = 1\n",
+        "GROUP BY cc.chronic_condition\n",
+        "ORDER BY cc.chronic_condition;"
+      ],
+      "catalog": "phr",
+      "schema": "03_gold"
+    },
+    {
+      "name": "cf997968",
+      "displayName": "Question 10",
+      "queryLines": [
+        "-- - [x] What is the predicted monthly inpatient admission volume and Medicare spending for the next 12 months by patient risk tier and primary diagnosis?\n",
+        "WITH patient_risk AS (\n",
+        "    -- Determine risk tier based on total historical admissions\n",
+        "    SELECT \n",
+        "        DESYNPUF_ID,\n",
+        "        CASE \n",
+        "            WHEN SUM(inpatient_admissions) >= 3 THEN 'High Risk'\n",
+        "            WHEN SUM(inpatient_admissions) BETWEEN 1 AND 2 THEN 'Medium Risk'\n",
+        "            ELSE 'Low Risk'\n",
+        "        END AS risk_tier\n",
+        "    FROM phr.`03_gold`.cost_utilization_timeseries\n",
+        "    GROUP BY DESYNPUF_ID\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    pr.risk_tier,\n",
+        "    -- Forecast based on historical monthly averages\n",
+        "    ROUND(AVG(ts.inpatient_admissions), 1) AS avg_monthly_admissions_per_patient,\n",
+        "    ROUND(AVG(ts.inpatient_cost), 0) AS avg_monthly_spend_per_patient,\n",
+        "    \n",
+        "    -- Projecting for a hypothetical cohort of 1,000 patients in each tier for next 12 months\n",
+        "    ROUND(AVG(ts.inpatient_cost) * 1000 * 12, 0) AS projected_annual_spend_per_1k_patients\n",
+        "\n",
+        "FROM phr.`03_gold`.cost_utilization_timeseries ts\n",
+        "JOIN patient_risk pr \n",
+        "    ON ts.DESYNPUF_ID = pr.DESYNPUF_ID\n",
+        "GROUP BY 1\n",
+        "ORDER BY avg_monthly_spend_per_patient DESC;"
+      ]
+    },
+    {
+      "name": "f46f9a3b",
+      "displayName": "Question 11",
+      "queryLines": [
+        "-- What is the average number of physician visits (primary care vs. specialist) per patient by chronic condition count?\n",
+        "WITH patient_visits AS (\n",
+        "  -- Aggregate time-series visits up to the patient level\n",
+        "  SELECT\n",
+        "    DESYNPUF_ID,\n",
+        "    SUM(carrier_visits) AS total_carrier_visits,\n",
+        "    SUM(outpatient_visits) AS total_outpatient_visits\n",
+        "  FROM phr.`03_gold`.cost_utilization_timeseries\n",
+        "  GROUP BY DESYNPUF_ID\n",
+        "),\n",
+        "conditions AS (\n",
+        "  SELECT\n",
+        "    DESYNPUF_ID,\n",
+        "    (\n",
+        "      (CASE WHEN SP_ALZHDMTA = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CHF = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CHRNKIDN = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_CNCR = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_COPD = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_DEPRESSN = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_DIABETES = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_ISCHMCHT = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_OSTEOPRS = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_RA_OA = '1' THEN 1 ELSE 0 END) +\n",
+        "      (CASE WHEN SP_STRKETIA = '1' THEN 1 ELSE 0 END)\n",
+        "    ) AS condition_count\n",
+        "  FROM phr.`03_gold`.patient_summary_360\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN condition_count = 0 THEN '0 Conditions'\n",
+        "    WHEN condition_count BETWEEN 1 AND 2 THEN '1-2 Conditions'\n",
+        "    ELSE '3+ Conditions'\n",
+        "  END AS chronic_group,\n",
+        "  \n",
+        "  ROUND(AVG(v.total_carrier_visits), 1) AS avg_carrier_visits,\n",
+        "  ROUND(AVG(v.total_outpatient_visits), 1) AS avg_outpatient_visits\n",
+        "\n",
+        "FROM conditions c\n",
+        "JOIN patient_visits v \n",
+        "  ON c.DESYNPUF_ID = v.DESYNPUF_ID\n",
+        "GROUP BY 1\n",
+        "ORDER BY 1;"
+      ]
+    },
+    {
+      "name": "8aee80f1",
+      "displayName": "Question 12",
+      "queryLines": [
+        "--  What percentage of readmissions had an emergency department visit in the 7 days prior?\n",
+        "SELECT\n",
+        "    COUNT(*) total_admissions,\n",
+        "    SUM(had_er_visit_7days_prior) readmissions_with_prior_emergency,\n",
+        "    ROUND(1 * SUM(had_er_visit_7days_prior) / COUNT(*), 5) AS pct_with_prior_emergency\n",
+        "FROM phr.`03_gold`.readmission_events\n",
+        "WHERE is_readmission_30day = 1;\n",
+        "\n",
+        "-- More finetuned option\n",
+        "-- SELECT\n",
+        "--     COUNT(*) AS total_readmissions,\n",
+        "--     SUM(had_er_visit_7days_prior) AS readmissions_with_prior_emergency,\n",
+        "--     ROUND(100.0 * SUM(had_er_visit_7days_prior) / COUNT(*), 2) AS pct_with_prior_emergency\n",
+        "-- FROM phr.`03_gold`.readmission_events\n",
+        "-- -- Filter for rows that ARE the readmission event (occurred within 30 days of previous)\n",
+        "-- WHERE days_since_last_discharge BETWEEN 0 AND 30;"
+      ]
+    },
+    {
+      "name": "b47fcca9",
+      "displayName": "Question 13",
+      "queryLines": [
+        "-- How do readmission rates and healthcare costs differ across demographic segments (age bands, gender, dual eligibility status), and what is the cost impact of these disparities?\n",
+        "SELECT\n",
+        "    -- 1. Demographic Segments\n",
+        "    CASE\n",
+        "        WHEN AGE < 65 THEN '<65 (Disabled/ESRD)'\n",
+        "        WHEN AGE BETWEEN 65 AND 74 THEN '65-74'\n",
+        "        WHEN AGE BETWEEN 75 AND 84 THEN '75-84'\n",
+        "        WHEN AGE >= 85 THEN '85+'\n",
+        "        ELSE 'Unknown'\n",
+        "    END AS age_group,\n",
+        "    \n",
+        "    CASE \n",
+        "        WHEN BENE_SEX_IDENT_CD = '1' THEN 'Male' \n",
+        "        WHEN BENE_SEX_IDENT_CD = '2' THEN 'Female'\n",
+        "        ELSE 'Unknown' \n",
+        "    END AS gender,\n",
+        "\n",
+        "    CASE\n",
+        "        WHEN BENE_RACE_CD = '1' THEN 'White'\n",
+        "        WHEN BENE_RACE_CD = '2' THEN 'Black'\n",
+        "        WHEN BENE_RACE_CD = '3' THEN 'Others'\n",
+        "        WHEN BENE_RACE_CD = '5' THEN 'Hispanic'\n",
+        "    END AS race,\n",
+        "\n",
+        "    -- 2. Volume & Rate\n",
+        "    COUNT(*) AS total_index_admissions,\n",
+        "    ROUND(AVG(is_readmission_30day) * 1, 2) AS readmission_rate,\n",
+        "\n",
+        "    -- 3. Cost Impact\n",
+        "    ROUND(AVG(CLM_PMT_AMT), 0) AS avg_cost_per_case,\n",
+        "    SUM(CLM_PMT_AMT) AS total_segment_cost\n",
+        "\n",
+        "FROM phr.`03_gold`.readmission_events\n",
+        "WHERE is_index_admission = 1 -- Calculate rates based on the population at risk\n",
+        "GROUP BY 1, 2, 3\n",
+        "ORDER BY 1, 2, 3;"
+      ],
+      "catalog": "phr",
+      "schema": "03_gold"
+    },
+    {
+      "name": "21e53f8f",
+      "displayName": "Question 14",
+      "queryLines": [
+        "-- Which patients have gaps in prescription refills >30 days (medication non-adherence), and how does this correlate with readmission risk?\n",
+        "WITH adherence_status AS (\n",
+        "    SELECT\n",
+        "        m.DESYNPUF_ID,\n",
+        "        CASE \n",
+        "            WHEN m.max_refill_gap_days > 30 THEN 'Non-Adherent (Gap > 30 Days)'\n",
+        "            ELSE 'Adherent (Gap <= 30 Days)'\n",
+        "        END AS adherence_group,\n",
+        "        m.max_refill_gap_days\n",
+        "    FROM phr.`03_gold`.medication_adherence_profile m\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    a.adherence_group,\n",
+        "    COUNT(DISTINCT a.DESYNPUF_ID) AS patient_count,\n",
+        "    \n",
+        "    -- Readmission Metrics\n",
+        "    COUNT(DISTINCT r.CLM_ID) AS total_admissions,\n",
+        "    SUM(r.is_readmission_30day) AS total_readmissions,\n",
+        "    \n",
+        "    -- The Correlation: Readmission Rate\n",
+        "    ROUND(SUM(r.is_readmission_30day) * 1.0 / COUNT(DISTINCT r.CLM_ID), 2) AS readmission_rate_pct,\n",
+        "    \n",
+        "    -- Cost Impact\n",
+        "    ROUND(AVG(r.CLM_PMT_AMT), 0) AS avg_cost_per_admission\n",
+        "\n",
+        "FROM adherence_status a\n",
+        "JOIN phr.`03_gold`.readmission_events r\n",
+        "    ON a.DESYNPUF_ID = r.DESYNPUF_ID\n",
+        "GROUP BY 1\n",
+        "ORDER BY readmission_rate_pct DESC;\n"
+      ]
+    },
+    {
+      "name": "91fd11d3",
+      "displayName": "Question 15",
+      "queryLines": [
+        "--  What are the most expensive drug classes by chronic condition, and which patients have potential drug-drug interaction risks?\n",
+        "SELECT\n",
+        "    -- Grouping by primary chronic condition driver\n",
+        "    CASE \n",
+        "        WHEN SP_CHF = 1 THEN 'Heart Failure'\n",
+        "        WHEN SP_DIABETES = 1 THEN 'Diabetes'\n",
+        "        WHEN SP_COPD = 1 THEN 'COPD'\n",
+        "        WHEN SP_CHRNKIDN = 1 THEN 'Chronic Kidney Disease'\n",
+        "        ELSE 'Other/Multiple'\n",
+        "    END as primary_condition,\n",
+        "\n",
+        "    -- Drug Spend Analysis\n",
+        "    COUNT(DISTINCT DESYNPUF_ID) as total_patients,\n",
+        "    ROUND(AVG(total_drug_cost), 0) as avg_annual_drug_spend,\n",
+        "\n",
+        "    -- DDI Risk Proxy: Polypharmacy (10+ Unique Meds)\n",
+        "    SUM(CASE WHEN unique_medications >= 10 THEN 1 ELSE 0 END) as patients_with_high_ddi_risk,\n",
+        "    \n",
+        "    ROUND(\n",
+        "        SUM(CASE WHEN unique_medications >= 10 THEN 1 ELSE 0 END) * 1.0 \n",
+        "        / COUNT(*)\n",
+        "    , 1) as pct_patients_high_ddi_risk\n",
+        "\n",
+        "FROM phr.`03_gold`.medication_adherence_profile\n",
+        "GROUP BY 1\n",
+        "ORDER BY avg_annual_drug_spend DESC;"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "fc5afe73",
+      "displayName": "Executive Summary",
+      "layout": [
+        {
+          "widget": {
+            "name": "352af32c",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "1f02dc4e",
+                  "fields": [
+                    {
+                      "name": "sum(high_risk_volume)",
+                      "expression": "SUM(`high_risk_volume`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(high_risk_volume)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "HIGH RISK PATIENTS",
+                "description": "high risk patients 2.23x more than population"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "aa9d2cda",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "27d2ead4",
+                  "fields": [
+                    {
+                      "name": "avg(readmission_rate)",
+                      "expression": "AVG(`readmission_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(readmission_rate)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "30-DAY READMISSION RATE"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "7d24c9c6",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "27d2ead4",
+                  "fields": [
+                    {
+                      "name": "diagnosis",
+                      "expression": "`diagnosis`"
+                    },
+                    {
+                      "name": "readmission_rate",
+                      "expression": "`readmission_rate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "diagnosis",
+                  "axis": {
+                    "hideLabels": true,
+                    "hideTitle": false,
+                    "labelAngle": 0
+                  },
+                  "displayName": "Diagnosis",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Non-extensive Burns",
+                        "Other Of The Eye ++ Or Thrombolytic Agent",
+                        "Hiv W/ Major Related Condition +",
+                        "Intraocular -",
+                        "Other Injury, Poisoning And Toxic Effect ++"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "readmission_rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  },
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Readmission Rate",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "diagnosis",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Diagnosis",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Other Of The Eye ++ Or Thrombolytic Agent",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 2
+                        }
+                      },
+                      {
+                        "value": "Other Injury, Poisoning And Toxic Effect ++",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      {
+                        "value": "Non-extensive Burns",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 1
+                        }
+                      },
+                      {
+                        "value": "Hiv W/ Major Related Condition +",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true,
+                  "text": {
+                    "fieldName": "readmission_rate",
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    },
+                    "displayName": "Readmission Rate"
+                  }
+                },
+                "extra": [
+                  {
+                    "fieldName": "diagnosis"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Top 5 DRGs by Readmission Rate"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "4ab8fb14",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ec661058",
+                  "fields": [
+                    {
+                      "name": "patient_volume",
+                      "expression": "`patient_volume`"
+                    },
+                    {
+                      "name": "risk_tier",
+                      "expression": "`risk_tier`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "patient_volume",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": " "
+                },
+                "color": {
+                  "fieldName": "risk_tier",
+                  "legend": {
+                    "hide": false,
+                    "position": "bottom"
+                  },
+                  "displayName": "Risk Tier",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "natural-order"
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Risk Tier Distribution"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 5,
+            "width": 2,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "6a259059",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ec661058",
+                  "fields": [
+                    {
+                      "name": "sum(total_annual_readmission_spend)",
+                      "expression": "SUM(`total_annual_readmission_spend`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(total_annual_readmission_spend)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "TOTAL ANNUAL SPENDING"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "28d625a2",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ec661058",
+                  "fields": [
+                    {
+                      "name": "sum(potential_savings_20pct)",
+                      "expression": "SUM(`potential_savings_20pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(potential_savings_20pct)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "POTENTIAL ANNUAL SAVINGS",
+                "description": "20% readmission reduction"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "449fb195",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "1f02dc4e",
+                  "fields": [
+                    {
+                      "name": "sum(tot_population)",
+                      "expression": "SUM(`tot_population`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(tot_population)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "TOTAL PATIENTS"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "069f969b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "79fbea6d",
+                  "fields": [
+                    {
+                      "name": "sum(patient_count)",
+                      "expression": "SUM(`patient_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(patient_count)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "description": "Top utilizers",
+                "title": "HIGH UTILIZERS"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c49ef389",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "55660b43",
+                  "fields": [
+                    {
+                      "name": "savings_tier",
+                      "expression": "`savings_tier`"
+                    },
+                    {
+                      "name": "sum(savings_amount)",
+                      "expression": "SUM(`savings_amount`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "savings_tier",
+                  "displayName": "Savings Tier",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "natural-order-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(savings_amount)",
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Savings Amount",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "savings_tier",
+                  "legend": {
+                    "hide": true
+                  },
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "10%",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 3
+                        }
+                      },
+                      {
+                        "value": "20%",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 2
+                        }
+                      },
+                      {
+                        "value": "30%",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 1
+                        }
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Savings Opportunity by Readmission Reduction Scenarios"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "65369958",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block\"><span style=\"font-size: 60px;line-height: 1.5;\">**EXECUTIVE SUMMARY**</span></span>"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "101ed97b",
+      "displayName": "Risk & Readmission Analysis",
+      "layout": [
+        {
+          "widget": {
+            "name": "0eb3f5a6",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "1f02dc4e",
+                  "fields": [
+                    {
+                      "name": "sum(high_risk_volume)",
+                      "expression": "SUM(`high_risk_volume`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(high_risk_volume)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "HIGH RISK PATIENTS",
+                "description": "2.23x more than population"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "7eb7e57b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "27d2ead4",
+                  "fields": [
+                    {
+                      "name": "measure(avg_comorbid)",
+                      "expression": "MEASURE(`avg_comorbid`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_comorbid)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "AVG COMORBIDITIES (HIGH RISK)",
+                "description": "Chronic conditions per patient"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "7227cd66",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "27d2ead4",
+                  "fields": [
+                    {
+                      "name": "diagnosis",
+                      "expression": "`diagnosis`"
+                    },
+                    {
+                      "name": "readmission_rate",
+                      "expression": "`readmission_rate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "diagnosis",
+                  "axis": {
+                    "labelAngle": 0,
+                    "hideLabels": true,
+                    "title": "Diagnosis"
+                  },
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "readmission_rate",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  },
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Readmission Rate",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "diagnosis",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Diagnosis",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Readmission Rate by DRG Category"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "e0f6dbc5",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8aee80f1",
+                  "fields": [
+                    {
+                      "name": "sum(pct_with_prior_emergency)",
+                      "expression": "SUM(`pct_with_prior_emergency`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(pct_with_prior_emergency)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "READMISSIONS WITH PRIOR ED VISIT",
+                "description": "Within 7 days of readmission"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "5e60a33b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "b47fcca9",
+                  "fields": [
+                    {
+                      "name": "avg(readmission_rate)",
+                      "expression": "AVG(`readmission_rate`)"
+                    },
+                    {
+                      "name": "avg(avg_cost_per_case)",
+                      "expression": "AVG(`avg_cost_per_case`)"
+                    },
+                    {
+                      "name": "avg(total_index_admissions)",
+                      "expression": "AVG(`total_index_admissions`)"
+                    },
+                    {
+                      "name": "race",
+                      "expression": "`race`"
+                    },
+                    {
+                      "name": "age_group",
+                      "expression": "`age_group`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "race",
+                  "displayName": "Race",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "age_group",
+                  "displayName": "Age Group",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "color": {
+                  "fieldName": "avg(readmission_rate)",
+                  "legend": {
+                    "hideTitle": false
+                  },
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  },
+                  "displayName": "Readmission Rate",
+                  "scale": {
+                    "type": "quantitative",
+                    "reverse": false,
+                    "colorRamp": {
+                      "mode": "scheme",
+                      "scheme": "blues"
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                },
+                "extra": [
+                  {
+                    "fieldName": "avg(avg_cost_per_case)"
+                  },
+                  {
+                    "fieldName": "avg(total_index_admissions)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Age Group vs Race"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "d4c56c17",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "b47fcca9",
+                  "fields": [
+                    {
+                      "name": "race",
+                      "expression": "`race`"
+                    },
+                    {
+                      "name": "avg(total_index_admissions)",
+                      "expression": "AVG(`total_index_admissions`)"
+                    },
+                    {
+                      "name": "avg(readmission_rate)",
+                      "expression": "AVG(`readmission_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "combo",
+              "encodings": {
+                "x": {
+                  "fieldName": "race",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                },
+                "color": {
+                  "legend": {
+                    "hide": true
+                  }
+                },
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "avg(total_index_admissions)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    },
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    },
+                    "axis": {
+                      "hideGrid": true
+                    }
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "avg(readmission_rate)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    },
+                    "format": {
+                      "type": "number-percent",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    },
+                    "axis": {
+                      "hideLabels": true,
+                      "hideGrid": true,
+                      "hideTitle": true
+                    }
+                  }
+                }
+              },
+              "mark": {
+                "colors": [
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 1
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 4
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 3
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 5
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Race by Index Admissions & Readmission Rate"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 17,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "b12eb67a",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block\"><span style=\"font-size: 60px;line-height: 1.5;\">**RISK & READMISSION ANALYSIS**</span></span>"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "fba3e75f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "b47fcca9",
+                  "fields": [
+                    {
+                      "name": "sum(total_segment_cost)",
+                      "expression": "SUM(`total_segment_cost`)"
+                    },
+                    {
+                      "name": "gender",
+                      "expression": "`gender`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(total_segment_cost)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Segment Cost"
+                },
+                "color": {
+                  "fieldName": "gender",
+                  "legend": {
+                    "title": "Gender",
+                    "position": "bottom",
+                    "hideTitle": true
+                  },
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Segment by Gender"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "117ba73e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "b47fcca9",
+                  "fields": [
+                    {
+                      "name": "sum(total_segment_cost)",
+                      "expression": "SUM(`total_segment_cost`)"
+                    },
+                    {
+                      "name": "race",
+                      "expression": "`race`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(total_segment_cost)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Segment Cost"
+                },
+                "color": {
+                  "fieldName": "race",
+                  "legend": {
+                    "hide": false,
+                    "hideTitle": true,
+                    "position": "bottom"
+                  },
+                  "displayName": "Race",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "angle-reversed"
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Segment by Race"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 11,
+            "width": 3,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "54e9ed32",
+      "displayName": "Cost & Financial Impact",
+      "layout": [
+        {
+          "widget": {
+            "name": "50b9b665",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "9fb6941e",
+                  "fields": [
+                    {
+                      "name": "avg(chronic_3)",
+                      "expression": "AVG(`chronic_3`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(chronic_3)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showDescription": false,
+                "showTitle": true,
+                "title": "TCOC (3+ CHRONIC CONDITIONS)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "7f42ce12",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "9fb6941e",
+                  "fields": [
+                    {
+                      "name": "avg(TOC_1_2)",
+                      "expression": "AVG(`TOC_1_2`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(TOC_1_2)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showDescription": false,
+                "showTitle": true,
+                "title": "TCOC (1-2 CHRONIC CONDITIONS)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "9ccb0b79",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "79fbea6d",
+                  "fields": [
+                    {
+                      "name": "sum(avg_annual_cost)",
+                      "expression": "SUM(`avg_annual_cost`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(avg_annual_cost)"
+                }
+              },
+              "frame": {
+                "showDescription": false,
+                "showTitle": true,
+                "title": "HIGH UTILIZERS (TOP 5%)"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "8b7b7c37",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "7a5d7da5",
+                  "fields": [
+                    {
+                      "name": "avg(projected_roi_percentage)",
+                      "expression": "AVG(`projected_roi_percentage`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(projected_roi_percentage)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showDescription": false,
+                "showTitle": true,
+                "title": "TCM PROGRAM ROI"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 8,
+            "width": 2,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "f5d77a23",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "9fb6941e",
+                  "fields": [
+                    {
+                      "name": "sum(total_cost_of_care)",
+                      "expression": "SUM(`total_cost_of_care`)"
+                    },
+                    {
+                      "name": "chronic_condition",
+                      "expression": "`chronic_condition`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(total_cost_of_care)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cost of Care"
+                },
+                "color": {
+                  "fieldName": "chronic_condition",
+                  "legend": {
+                    "hideTitle": false,
+                    "position": "bottom"
+                  },
+                  "displayName": "Chronic Condition",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Chronic Condition by Cost of Care"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 4,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "a030d8eb",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "4bd3515c",
+                  "fields": [
+                    {
+                      "name": "comorbidity_cluster",
+                      "expression": "`comorbidity_cluster`"
+                    },
+                    {
+                      "name": "total_cluster_cost",
+                      "expression": "`total_cluster_cost`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "comorbidity_cluster",
+                  "axis": {
+                    "hideLabels": false,
+                    "labelAngle": 0
+                  },
+                  "displayName": "Comorbidity Cluster",
+                  "scale": {
+                    "type": "categorical",
+                    "categorySize": {
+                      "type": "number-of-categories",
+                      "number": 5
+                    },
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "total_cluster_cost",
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Cost",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "comorbidity_cluster",
+                  "legend": {
+                    "hideTitle": true,
+                    "hide": true,
+                    "position": "bottom"
+                  },
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "No Chronic Conditions",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 1
+                        }
+                      },
+                      {
+                        "value": "Osteoporosis",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 1
+                        }
+                      },
+                      {
+                        "value": "Ischemic Heart Disease",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 2
+                        }
+                      },
+                      {
+                        "value": "Diabetes, Ischemic Heart Disease",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 3
+                        }
+                      },
+                      {
+                        "value": "Diabetes",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true,
+                  "text": {
+                    "fieldName": "total_cluster_cost",
+                    "format": {
+                      "type": "number-currency",
+                      "currencyCode": "USD",
+                      "abbreviation": "compact",
+                      "decimalPlaces": {
+                        "type": "max",
+                        "places": 2
+                      }
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Comorbidity by Cost"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 6,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "0e5bd7c7",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block\"><span style=\"font-size: 60px;line-height: 1.5;\">**COST & FINANCIAL IMPACT**</span></span>"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "fb3993d8",
+      "displayName": "Utilization & Forecasting",
+      "layout": [
+        {
+          "widget": {
+            "name": "d8bdf39d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "40ebca46",
+                  "fields": [
+                    {
+                      "name": "avg(avg_los)",
+                      "expression": "AVG(`avg_los`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(avg_los)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "AVG LOS (3+ CONDITIONS)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "a0d6d2de",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "40ebca46",
+                  "fields": [
+                    {
+                      "name": "avg_admissions_per_patient",
+                      "expression": "`avg_admissions_per_patient`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_admissions_per_patient",
+                  "rowNumber": 3
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": true,
+                "title": "AVG ADMISSION FREQUENCY",
+                "description": "Per patient annually (3+ conditions)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "f59acb1e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f46f9a3b",
+                  "fields": [
+                    {
+                      "name": "avg_carrier_visits",
+                      "expression": "`avg_carrier_visits`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg_carrier_visits",
+                  "rowNumber": -1
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": true,
+                "title": "AVG PHYSICIAN VISITS",
+                "description": "Per patient annually (3+ conditions)"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "82d3432d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cf997968",
+                  "fields": [
+                    {
+                      "name": "sum(projected_annual_spend_per_1k_patients)",
+                      "expression": "SUM(`projected_annual_spend_per_1k_patients`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(projected_annual_spend_per_1k_patients)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": true,
+                "title": "PROJECTED ANNUAL SPEND",
+                "description": "per 1000 patients"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "7d426258",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "40ebca46",
+                  "fields": [
+                    {
+                      "name": "sum(avg_los)",
+                      "expression": "SUM(`avg_los`)"
+                    },
+                    {
+                      "name": "chronic_condition",
+                      "expression": "`chronic_condition`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(avg_los)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Length of Stay"
+                },
+                "color": {
+                  "fieldName": "chronic_condition",
+                  "legend": {
+                    "hide": false,
+                    "position": "bottom"
+                  },
+                  "displayName": "Chronic Condition",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "0",
+                        "1-2",
+                        "3+"
+                      ]
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Chronic Condition by LOS"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 6,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "2f96f0b0",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f46f9a3b",
+                  "fields": [
+                    {
+                      "name": "chronic_group",
+                      "expression": "`chronic_group`"
+                    },
+                    {
+                      "name": "avg_outpatient_visits",
+                      "expression": "`avg_outpatient_visits`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "chronic_group",
+                  "axis": {
+                    "hideLabels": true
+                  },
+                  "displayName": "Chronic Group",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "avg_outpatient_visits",
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Outpatient Visits",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "chronic_group",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Chronic Group By Outpatient Visits"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 3,
+            "height": 11
+          }
+        },
+        {
+          "widget": {
+            "name": "8b726c76",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cf997968",
+                  "fields": [
+                    {
+                      "name": "risk_tier",
+                      "expression": "`risk_tier`"
+                    },
+                    {
+                      "name": "sum(projected_annual_spend_per_1k_patients)",
+                      "expression": "SUM(`projected_annual_spend_per_1k_patients`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "risk_tier",
+                  "axis": {
+                    "hideLabels": true
+                  },
+                  "displayName": "Risk Tier",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "High Risk",
+                        "Medium Risk",
+                        "Low Risk"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(projected_annual_spend_per_1k_patients)",
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Annual Spend",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "risk_tier",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Risk Tier by Annual Spend"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 13,
+            "width": 3,
+            "height": 11
+          }
+        },
+        {
+          "widget": {
+            "name": "1d49e75d",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block\"><span style=\"font-size: 60px;line-height: 1.5;\">**UTILIZATION & FORECASTING**</span></span>"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "aaf17fad",
+      "displayName": "Medication Management",
+      "layout": [
+        {
+          "widget": {
+            "name": "d56a9fab",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block\"><span style=\"font-size: 60px;line-height: 1.5;\">**MEDICATION MANAGEMENT**</span></span>"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "28af4c8d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c9557e32",
+                  "fields": [
+                    {
+                      "name": "avg(avg_annual_drug_cost)",
+                      "expression": "AVG(`avg_annual_drug_cost`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(avg_annual_drug_cost)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": true,
+                "title": "Avg Rx Cost (Per Patient)",
+                "description": "Annual prescription drug cost"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 1,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "46ca3996",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "21e53f8f",
+                  "fields": [
+                    {
+                      "name": "patient_count",
+                      "expression": "`patient_count`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "patient_count",
+                  "rowNumber": 4
+                },
+                "target": {
+                  "fieldName": "patient_count",
+                  "change": {
+                    "type": "percent"
+                  },
+                  "rowNumber": 1
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "Medication Non-Adherence"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 1,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "7a9fee30",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c9557e32",
+                  "fields": [
+                    {
+                      "name": "avg(pct_polypharmacy_5plus_meds)",
+                      "expression": "AVG(`pct_polypharmacy_5plus_meds`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(pct_polypharmacy_5plus_meds)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "% OF POLYPHARMCY"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 1,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "c88e06dd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "91fd11d3",
+                  "fields": [
+                    {
+                      "name": "avg(pct_patients_high_ddi_risk)",
+                      "expression": "AVG(`pct_patients_high_ddi_risk`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(pct_patients_high_ddi_risk)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "DRUG-DRUG INTERACTION RISK",
+                "description": "Patients with potential risks"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 1,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "5a691e53",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "91fd11d3",
+                  "fields": [
+                    {
+                      "name": "sum(patients_with_high_ddi_risk)",
+                      "expression": "SUM(`patients_with_high_ddi_risk`)"
+                    },
+                    {
+                      "name": "primary_condition",
+                      "expression": "`primary_condition`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(patients_with_high_ddi_risk)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  },
+                  "displayName": "Drug-Drug Interaction Patients"
+                },
+                "color": {
+                  "fieldName": "primary_condition",
+                  "legend": {
+                    "position": "bottom"
+                  },
+                  "displayName": "Primary Condtion",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Primary Conditon By DDI"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 6,
+            "width": 2,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "fffce7bd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "91fd11d3",
+                  "fields": [
+                    {
+                      "name": "primary_condition",
+                      "expression": "`primary_condition`"
+                    },
+                    {
+                      "name": "avg_annual_drug_spend",
+                      "expression": "`avg_annual_drug_spend`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "primary_condition",
+                  "axis": {
+                    "hideLabels": true,
+                    "title": "Primary Condition"
+                  },
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "avg_annual_drug_spend",
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "Annual Drug Spend",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "primary_condition",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Primary Condition",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Other/Multiple",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      {
+                        "value": "Heart Failure",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 1
+                        }
+                      },
+                      {
+                        "value": "Chronic Kidney Disease",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 2
+                        }
+                      },
+                      {
+                        "value": "Diabetes",
+                        "color": {
+                          "themeColorType": "visualizationColors",
+                          "position": 2
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "PrImary Conditon by Annual drug spend"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "79e97a57",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "21e53f8f",
+                  "fields": [
+                    {
+                      "name": "avg_cost_per_admission",
+                      "expression": "`avg_cost_per_admission`"
+                    },
+                    {
+                      "name": "adherence_group",
+                      "expression": "`adherence_group`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "avg_cost_per_admission",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Avg Cost per Admission"
+                },
+                "color": {
+                  "fieldName": "adherence_group",
+                  "displayName": "Adherence Grp",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Adherence Group by Cost of Admission"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 13,
+            "width": 2,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "62249d1f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "21e53f8f",
+                  "fields": [
+                    {
+                      "name": "avg(avg_cost_per_admission)",
+                      "expression": "AVG(`avg_cost_per_admission`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(avg_cost_per_admission)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "USD",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "showDescription": false,
+                "title": "AVG DRUG COST PER ADMISSION"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "44b1fc49",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c9557e32",
+                  "fields": [
+                    {
+                      "name": "chronic_group",
+                      "expression": "`chronic_group`"
+                    },
+                    {
+                      "name": "pct_polypharmacy_5plus_meds",
+                      "expression": "`pct_polypharmacy_5plus_meds`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "chronic_group",
+                  "axis": {
+                    "hideLabels": true
+                  },
+                  "displayName": "Chronic Group",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "pct_polypharmacy_5plus_meds",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  },
+                  "axis": {
+                    "hideGrid": true
+                  },
+                  "displayName": "% Polypharmacy",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "chronic_group",
+                  "legend": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Chronic Group",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Chronic Group by % Polypharmacy"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 4,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#F6FAFB",
+        "dark": "#1B1F23"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#2A2F35"
+      },
+      "widgetBorderColor": {
+        "light": "#D7E1E9",
+        "dark": "#3C444C"
+      },
+      "fontColor": {
+        "light": "#374151",
+        "dark": "#E4E9EE"
+      },
+      "selectionColor": {
+        "light": "#5FA8D3",
+        "dark": "#5FA8D3"
+      },
+      "visualizationColors": [
+        "#5FA8D3",
+        "#70BEE1",
+        "#89CCE7",
+        "#A1DAEC",
+        "#B3E6DC",
+        "#89C7A8",
+        "#6EAD80",
+        "#589F60",
+        "#478743",
+        "#356C2A"
+      ],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "applyModeEnabled": false
+  }
+}
