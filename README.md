@@ -15,7 +15,6 @@ End-to-end analytics pipeline to predict 30-day readmission risk from CMS claims
 - **Versioning/CI**: GitHub + optional CI (lint/test/dbt).
 
 ## Architecture diagram
-## Architecture diagram
 
 ```mermaid
 flowchart LR
