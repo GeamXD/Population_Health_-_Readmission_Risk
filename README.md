@@ -40,7 +40,7 @@ flowchart LR
   - Cost impact and ROI estimates for intervention scenarios
 
 ## Link to Business Presentation (critical)
-- **Business deck (Canva)**: `[[CANVA_LINK_BUSINESS_PRESENTATION]]`
+- **Business deck (Canva)**: ![Deck](https://www.canva.com/design/DAG9i6gBNGU/uWBBuT-7blUsqGmbvIYwmg/edit?utm_content=DAG9i6gBNGU&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton)
 
 ## How to run (optional)
 1. Configure Databricks workspace + cluster policies.
