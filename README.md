@@ -173,9 +173,10 @@ This presentation provides executive-level overview of:
 
 2. **Clone Repository**
    ```bash
-   git clone https://github.com/GeamXD/Population_Health_-_Readmission_Risk.git
+   git clone https://github.com/<your-username>/Population_Health_-_Readmission_Risk.git
    cd Population_Health_-_Readmission_Risk
    ```
+   > Replace `<your-username>` with your GitHub username if working with a fork
 
 3. **Set Up Data Pipeline**
    - Import notebooks into Databricks workspace
@@ -228,8 +229,21 @@ This presentation provides executive-level overview of:
 
 6. **Deploy Streamlit Web Application**
    - Upload app files to Databricks Apps or external hosting
-   - Configure `DATABRICKS_TOKEN` secret for API authentication
-   - Update `ENDPOINT_URL` in `app.py` with your serving endpoint
+   - Configure authentication secret:
+     ```bash
+     # For Databricks Apps (automatic):
+     # Token is automatically injected via st.secrets['DATABRICKS_TOKEN']
+     
+     # For local/external deployment:
+     # Create .streamlit/secrets.toml file:
+     echo 'DATABRICKS_TOKEN = "dapi..."' > .streamlit/secrets.toml
+     ```
+   - Update `ENDPOINT_URL` in `app.py` with your serving endpoint:
+     ```python
+     # Example format:
+     ENDPOINT_URL = "https://<workspace-url>/serving-endpoints/<endpoint-name>/invocations"
+     # e.g., "https://dbc-abc123.cloud.databricks.com/serving-endpoints/readmission/invocations"
+     ```
    - Launch application:
      ```bash
      streamlit run app.py
